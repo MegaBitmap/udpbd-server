@@ -69,7 +69,7 @@ public:
             printf("Error %lu attempting to dismount volume, error code\n", err);
         }
 
-        // Get the size of the file
+        // Get disk geometry for sector size
         DWORD junk = 0;
         DISK_GEOMETRY pdg;
         BOOL bResult = DeviceIoControl(_fp,                           // device to be queried
@@ -81,16 +81,50 @@ public:
 
         if (bResult)
         {
-            sector_offset = 0;
-            _fsize = pdg.Cylinders.QuadPart * (ULONG)pdg.TracksPerCylinder *
-                     (ULONG)pdg.SectorsPerTrack * (ULONG)pdg.BytesPerSector;
-            sector_size = pdg.BytesPerSector;
+            sector_size = pdg.BytesPerSector; // Use actual sector size from disk
+        }
+        else
+        {
+            sector_size = 512; // Fallback to standard sector size
+            printf("Warning: Could not get disk geometry, using default sector size 512\n");
+        }
+
+        // Get the volume/partition size
+        PARTITION_INFORMATION_EX partInfo;
+
+        bResult = DeviceIoControl(_fp,                              // device to be queried
+                                  IOCTL_DISK_GET_PARTITION_INFO_EX, // operation to perform
+                                  NULL, 0,                          // no input buffer
+                                  &partInfo, sizeof(partInfo),      // output buffer
+                                  &junk,                            // # bytes returned
+                                  (LPOVERLAPPED)NULL);
+
+        if (bResult)
+        {
+            _fsize = partInfo.PartitionLength.QuadPart;
+        }
+        else
+        {
+            // Fallback to disk length info
+            GET_LENGTH_INFORMATION lengthInfo;
+            bResult = DeviceIoControl(_fp,                            // device to be queried
+                                     IOCTL_DISK_GET_LENGTH_INFO,      // operation to perform
+                                     NULL, 0,                         // no input buffer
+                                     &lengthInfo, sizeof(lengthInfo), // output buffer
+                                     &junk,                           // # bytes returned
+                                     (LPOVERLAPPED)NULL);
+            if (bResult)
+                _fsize = lengthInfo.Length.QuadPart;
+        }
+
+        if (bResult)
+        {            
             printf("Opened '%s' as Block Device\n", sFileName);
             printf(" - %s\n", _read_only ? "read-only" : "read/write");
             printf(" - size = %lldMB / %lldMiB, sector size = %lld\n", _fsize / (1000 * 1000), _fsize / (1024 * 1024), sector_size);
         }
         else
-            printf("Error: %lu\n", GetLastError());
+            printf("Error getting volume/disk size: %lu\n", GetLastError());
         fflush(stdout);
     }
 
