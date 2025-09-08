@@ -311,7 +311,7 @@ public:
 private:
     void print_stats()
     {
-        printf("Total read: %llu KiB, total write: %llu KiB", _total_read/1024, _total_write/1024);
+        printf("Total read: %llu KiB, total write: %llu KiB\r", _total_read/1024, _total_write/1024);
         fflush(stdout);
     }
 
@@ -358,7 +358,7 @@ private:
         char str[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &si_other.sin_addr, str, INET_ADDRSTRLEN);
 
-        printf("\rUDPBD_CMD_INFO from %s\n", str);
+        printf("UDPBD_CMD_INFO from %s     \n", str);
         print_stats();
 
         // Reply header
@@ -372,7 +372,7 @@ private:
         // Send packet to ps2
         if (sendto(s, (char *)&reply, sizeof(reply), 0, (struct sockaddr *)&si_other, sizeof(si_other)) == -1)
         {
-            throw runtime_error("sendto");
+            printf("Error calling sendto in handle_cmd_info\nReady for Retry\n");
         }
     }
 
@@ -380,7 +380,7 @@ private:
     {
         struct SUDPBDv2_RDMA reply;
 
-        printf("\rUDPBD_CMD_READ(cmdId=%d, startSector=%d, sectorCount=%d)\n", request->hdr.cmdid, request->sector_nr, request->sector_count);
+        printf("UDPBD_CMD_READ(cmdId=%d, startSector=%d, sectorCount=%d)\n", request->hdr.cmdid, request->sector_nr, request->sector_count);
 
         // Optimize RDMA block size for number of sectors
         set_block_shift_sectors(request->sector_count);
@@ -411,7 +411,7 @@ private:
             // Send packet to ps2
             if (sendto(s, (char *)&reply, sizeof(struct SUDPBDv2_Header) + 4 + (reply.bt.block_count * _block_size), 0, (struct sockaddr *)&si_other, sizeof(si_other)) == -1)
             {
-                throw runtime_error("sendto");
+                throw runtime_error("Error calling sendto in handle_cmd_read");
             }
             reply.hdr.cmdpkt++;
         }
@@ -419,7 +419,7 @@ private:
 
     void handle_cmd_write(struct sockaddr_in &si_other, struct SUDPBDv2_RWRequest *request)
     {
-        printf("\rUDPBD_CMD_WRITE(cmdId=%d, startSector=%d, sectorCount=%d)\n", request->hdr.cmdid, request->sector_nr, request->sector_count);
+        printf("UDPBD_CMD_WRITE(cmdId=%d, startSector=%d, sectorCount=%d)\n", request->hdr.cmdid, request->sector_nr, request->sector_count);
 
         _bd.seek(request->sector_nr);
         _write_size_left = request->sector_count * 512;
@@ -448,7 +448,7 @@ private:
             // Send packet to ps2
             if (sendto(s, (char *)&reply, sizeof(reply), 0, (struct sockaddr *)&si_other, sizeof(si_other)) == -1)
             {
-                throw runtime_error("sendto");
+                throw runtime_error("Error calling sendto in handle_cmd_write_rdma");
             }
         }
     }
