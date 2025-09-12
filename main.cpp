@@ -11,25 +11,24 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #elif defined(_WIN32) || defined(__WIN32__) || defined(WIN32)
-#include <windows.h>
-#include <winioctl.h>
-#include <ws2tcpip.h>
-#include <Windef.h>
 #include <winsock2.h>
-#include <winsock.h>
-#include <WS2tcpip.h>
-
-#ifndef _off64_t
-#define _off64_t off64_t
-#endif
-
-#else
-
+#include <ws2tcpip.h>
 #endif
 
 #include "udpbd.h"
 
 #define BUFLEN 2048
+
+#if defined(__APPLE__) || defined( __FreeBSD__)
+#include <sys/ioctl.h>
+#include <sys/disk.h>
+#define lseek64 lseek
+#define loff_t off_t
+#endif
+
+#if defined(__APPLE__)
+#define _DARWIN_USE_64_BIT_INODE 1
+#endif
 
 using namespace std;
 
@@ -70,7 +69,7 @@ public:
             printf("Error %lu attempting to dismount volume, error code\n", err);
         }
 
-        // Get the size of the file
+        // Get disk geometry for sector size
         DWORD junk = 0;
         DISK_GEOMETRY pdg;
         BOOL bResult = DeviceIoControl(_fp,                           // device to be queried
@@ -82,16 +81,50 @@ public:
 
         if (bResult)
         {
-            sector_offset = 0;
-            _fsize = pdg.Cylinders.QuadPart * (ULONG)pdg.TracksPerCylinder *
-                     (ULONG)pdg.SectorsPerTrack * (ULONG)pdg.BytesPerSector;
-            sector_size = pdg.BytesPerSector;
-            printf("Opened '%s' as Block Device\n", sFileName);
-            printf(" - %s\n", _read_only ? "read-only" : "read/write");
-            printf(" - size = %ldMB / %ldMiB, sector size = %ld\n", _fsize / (1000 * 1000), _fsize / (1024 * 1024), sector_size);
+            sector_size = pdg.BytesPerSector; // Use actual sector size from disk
         }
         else
-            printf("Error: %lu\n", GetLastError());
+        {
+            sector_size = 512; // Fallback to standard sector size
+            printf("Warning: Could not get disk geometry, using default sector size 512\n");
+        }
+
+        // Get the volume/partition size
+        PARTITION_INFORMATION_EX partInfo;
+
+        bResult = DeviceIoControl(_fp,                              // device to be queried
+                                  IOCTL_DISK_GET_PARTITION_INFO_EX, // operation to perform
+                                  NULL, 0,                          // no input buffer
+                                  &partInfo, sizeof(partInfo),      // output buffer
+                                  &junk,                            // # bytes returned
+                                  (LPOVERLAPPED)NULL);
+
+        if (bResult)
+        {
+            _fsize = partInfo.PartitionLength.QuadPart;
+        }
+        else
+        {
+            // Fallback to disk length info
+            GET_LENGTH_INFORMATION lengthInfo;
+            bResult = DeviceIoControl(_fp,                            // device to be queried
+                                     IOCTL_DISK_GET_LENGTH_INFO,      // operation to perform
+                                     NULL, 0,                         // no input buffer
+                                     &lengthInfo, sizeof(lengthInfo), // output buffer
+                                     &junk,                           // # bytes returned
+                                     (LPOVERLAPPED)NULL);
+            if (bResult)
+                _fsize = lengthInfo.Length.QuadPart;
+        }
+
+        if (bResult)
+        {            
+            printf("Opened '%s' as Block Device\n", sFileName);
+            printf(" - %s\n", _read_only ? "read-only" : "read/write");
+            printf(" - size = %lldMB / %lldMiB, sector size = %lld\n", _fsize / (1000 * 1000), _fsize / (1024 * 1024), sector_size);
+        }
+        else
+            printf("Error getting volume/disk size: %lu\n", GetLastError());
         fflush(stdout);
     }
 
@@ -134,14 +167,14 @@ public:
             // If this call has remaining bytes, store them for next call
             if (remainder != 0)
             {
-                memcpy(sector_buffer, data + size, sector_size - remainder);
+                memcpy(sector_buffer, (char *)data + size, sector_size - remainder);
                 sector_offset = (sector_size - remainder);
             }
             else
                 sector_offset = 0;
         }
         else
-            printf("Error reading sectors: %lu\n", GetLastError());
+            printf("Error reading sectors: %ld\n", GetLastError());
     }
 
     // TODO: This method is not optimized, nonetheless in game write operations are not critical
@@ -165,7 +198,7 @@ public:
         ret = WriteFile(_fp, sector_buffer, aux_size, &rv, NULL);
         // printf("write %ld\n", size);
         if (ret == 0)
-            printf("write error %ld != %ld,%lu\n", rv, size, GetLastError());
+            printf("write error %ld != %llu,%lu\n", rv, size, GetLastError());
     }
 
     uint32_t get_sector_size() { return sector_size; }
@@ -187,7 +220,7 @@ private:
 class CUDPBDServer
 {
 public:
-    CUDPBDServer(class CBlockDevice &bd) : _bd(bd), _block_shift(0)
+    CUDPBDServer(class CBlockDevice &bd) : _bd(bd), _block_shift(0), _total_read(0), _total_write(0)
     {
         set_block_shift(5); // 128b blocks
         struct sockaddr_in si_me;
@@ -219,7 +252,7 @@ public:
         si_me.sin_family = AF_INET;
         si_me.sin_port = htons(UDPBD_PORT);
         si_me.sin_addr.s_addr = htonl(INADDR_ANY);
-        if (bind(s, (struct sockaddr *)&si_me, sizeof(si_me)) == -1)
+        if (::bind(s, (struct sockaddr*)&si_me, sizeof(si_me)) == -1)
         {
             throw runtime_error("bind");
         }
@@ -276,12 +309,18 @@ public:
     }
 
 private:
+    void print_stats()
+    {
+        printf("Total read: %llu KiB, total write: %llu KiB\r", _total_read/1024, _total_write/1024);
+        fflush(stdout);
+    }
+
     void set_block_shift(uint32_t shift)
     {
         if (shift != _block_shift)
         {
-            _block_shift = shift;
-            _block_size = 1 << (_block_shift + 2);
+            _block_shift       = shift;
+            _block_size        = 1 << (_block_shift + 2);
             _blocks_per_packet = RDMA_MAX_PAYLOAD / _block_size;
             _blocks_per_sector = _bd.get_sector_size() / _block_size;
             printf("Block size changed to %d\n", _block_size);
@@ -319,7 +358,8 @@ private:
         char str[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &si_other.sin_addr, str, INET_ADDRSTRLEN);
 
-        printf("UDPBD_CMD_INFO from %s\n", str);
+        printf("UDPBD_CMD_INFO from %s     \n", str);
+        print_stats();
 
         // Reply header
         reply.hdr.cmd = UDPBD_CMD_INFO_REPLY;
@@ -332,7 +372,7 @@ private:
         // Send packet to ps2
         if (sendto(s, (char *)&reply, sizeof(reply), 0, (struct sockaddr *)&si_other, sizeof(si_other)) == -1)
         {
-            throw runtime_error("sendto");
+            printf("Error calling sendto in handle_cmd_info\nReady for Retry\n");
         }
     }
 
@@ -340,7 +380,7 @@ private:
     {
         struct SUDPBDv2_RDMA reply;
 
-        // printf("UDPBD_CMD_READ(cmdId=%d, startSector=%d, sectorCount=%d)\n", request->hdr.cmdid, request->sector_nr, request->sector_count);
+        printf("UDPBD_CMD_READ(cmdId=%d, startSector=%d, sectorCount=%d)\n", request->hdr.cmdid, request->sector_nr, request->sector_count);
 
         // Optimize RDMA block size for number of sectors
         set_block_shift_sectors(request->sector_count);
@@ -352,6 +392,9 @@ private:
         reply.bt.block_shift = _block_shift;
 
         uint32_t blocks_left = request->sector_count * _blocks_per_sector;
+
+        _total_read += blocks_left * _block_size;
+        print_stats();
 
         _bd.seek(request->sector_nr);
         _bd.clear_sector_offset();
@@ -368,7 +411,7 @@ private:
             // Send packet to ps2
             if (sendto(s, (char *)&reply, sizeof(struct SUDPBDv2_Header) + 4 + (reply.bt.block_count * _block_size), 0, (struct sockaddr *)&si_other, sizeof(si_other)) == -1)
             {
-                throw runtime_error("sendto");
+                throw runtime_error("Error calling sendto in handle_cmd_read");
             }
             reply.hdr.cmdpkt++;
         }
@@ -380,6 +423,9 @@ private:
 
         _bd.seek(request->sector_nr);
         _write_size_left = request->sector_count * 512;
+
+        _total_write += _write_size_left;
+        print_stats();
     }
 
     void handle_cmd_write_rdma(struct sockaddr_in &si_other, struct SUDPBDv2_RDMA *request)
@@ -394,15 +440,15 @@ private:
             struct SUDPBDv2_WriteDone reply;
 
             // Reply header
-            reply.hdr.cmd = UDPBD_CMD_WRITE_DONE;
-            reply.hdr.cmdid = request->hdr.cmdid;
-            reply.hdr.cmdpkt = request->hdr.cmdid + 1;
-            reply.result = 0;
+            reply.hdr.cmd      = UDPBD_CMD_WRITE_DONE;
+            reply.hdr.cmdid    = request->hdr.cmdid;
+            reply.hdr.cmdpkt   = request->hdr.cmdid + 1;
+            reply.result       = 0;
 
             // Send packet to ps2
             if (sendto(s, (char *)&reply, sizeof(reply), 0, (struct sockaddr *)&si_other, sizeof(si_other)) == -1)
             {
-                throw runtime_error("sendto");
+                throw runtime_error("Error calling sendto in handle_cmd_write_rdma");
             }
         }
     }
@@ -413,6 +459,9 @@ private:
     uint32_t _blocks_per_packet;
     uint32_t _blocks_per_sector;
     int s;
+
+    uint64_t _total_read;
+    uint64_t _total_write;
 
     uint32_t _write_size_left;
 };
