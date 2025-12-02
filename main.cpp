@@ -42,16 +42,15 @@ public:
     {
         // Open the selected file.
         // This file will be used as the Block Device
-        _fp = CreateFile(sFileName, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
+        _fp = CreateFileA(sFileName, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
 
         if (_fp == INVALID_HANDLE_VALUE)
         {
-            _read_only = true;
-
-            //_fp = open(sFileName, _read_only ? O_RDONLY : O_RDWR);
-            _fp = CreateFile(sFileName, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
-            if (_fp == INVALID_HANDLE_VALUE)
-                throw runtime_error(string("unable to open file ") + sFileName);
+            DWORD errorNum = GetLastError(); 
+            string message = system_category().message(errorNum);
+            if (errorNum == 5)
+                printf("Try again with 'Run as administrator'\n");
+            throw runtime_error(string("unable to open file ") + sFileName + "\n" + message);
         }
 
         DWORD status;
@@ -269,6 +268,7 @@ public:
 
     void run()
     {
+        bool wait_network = true;
         struct sockaddr_in si_other;
         socklen_t slen = sizeof(si_other);
         int recv_len;
@@ -286,6 +286,13 @@ public:
             }
 
             struct SUDPBDv2_Header *hdr = (struct SUDPBDv2_Header *)buf;
+
+            if (wait_network)
+            {
+                wait_network = false;
+                printf("Waiting for the network to fully initialize . . .\n");
+                Sleep(4000);
+            }
 
             // Process command
             switch (hdr->cmd)
@@ -311,7 +318,7 @@ public:
 private:
     void print_stats()
     {
-        printf("Total read: %llu KiB, total write: %llu KiB\r", _total_read/1024, _total_write/1024);
+        printf(" Total read: %llu KiB, total write: %llu KiB\r", _total_read/1024, _total_write/1024);
         fflush(stdout);
     }
 
@@ -466,12 +473,28 @@ private:
     uint32_t _write_size_left;
 };
 
+void print_help(char *exe)
+{
+    printf("Usage:\n");
+    printf("  %s <file>\n", exe);
+    printf("Example:\n");
+    printf("Replace drive letter 'E' to target an exFAT volume/partition\n");
+    printf("  %s \\\\.\\E:\n", exe);
+    printf("or\n");
+    printf("  & '%s' '\\\\.\\E:'\n\n", exe);
+}
+
 int main(int argc, char *argv[])
 {
     if (argc < 2)
     {
-        printf("Usage:\n");
-        printf("  %s <file>\n", argv[0]);
+        print_help(argv[0]);
+        return -1;
+    }
+    string arg = argv[1];
+    if (arg == "-h" || arg == "-?" || arg == "-help" || arg == "--help")
+    {
+        print_help(argv[0]);
         return -1;
     }
 

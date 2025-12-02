@@ -1,2 +1,5 @@
 *.o
 udpbd-server
+/.vscode
+*.exe
+*.dll
