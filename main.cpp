@@ -11,6 +11,7 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #elif defined(_WIN32) || defined(__WIN32__) || defined(WIN32)
+#include <conio.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #endif
@@ -30,7 +31,13 @@
 #define _DARWIN_USE_64_BIT_INODE 1
 #endif
 
-using namespace std;
+std::runtime_error ErrorMessage()
+{
+    int errorNum = GetLastError();
+    _cprintf("Error code %d\n%s\n", errorNum,
+    std::system_category().message(errorNum).c_str());
+    return std::runtime_error(std::to_string(errorNum));
+}
 
 /*
  * class CBlockDevice
@@ -46,11 +53,8 @@ public:
 
         if (_fp == INVALID_HANDLE_VALUE)
         {
-            DWORD errorNum = GetLastError(); 
-            string message = system_category().message(errorNum);
-            if (errorNum == 5)
-                printf("Try again with 'Run as administrator'\n");
-            throw runtime_error(string("unable to open file ") + sFileName + "\n" + message);
+            _cprintf("unable to open file %s\n", sFileName);
+            throw ErrorMessage();
         }
 
         DWORD status;
@@ -58,14 +62,15 @@ public:
         if (!DeviceIoControl(_fp, FSCTL_LOCK_VOLUME,
                              NULL, 0, NULL, 0, &status, NULL))
         {
-            printf("Error %lu attempting to lock device\n", GetLastError());
+            _cprintf("Error attempting to lock device\n");
+           throw ErrorMessage();
         }
 
         if (!DeviceIoControl(_fp, FSCTL_DISMOUNT_VOLUME,
                              NULL, 0, NULL, 0, &status, NULL))
         {
-            DWORD err = GetLastError();
-            printf("Error %lu attempting to dismount volume, error code\n", err);
+            _cprintf("Error attempting to dismount volume\n");
+            throw ErrorMessage();
         }
 
         // Get disk geometry for sector size
@@ -85,7 +90,7 @@ public:
         else
         {
             sector_size = 512; // Fallback to standard sector size
-            printf("Warning: Could not get disk geometry, using default sector size 512\n");
+            _cprintf("Warning: Could not get disk geometry, using default sector size 512\n");
         }
 
         // Get the volume/partition size
@@ -118,12 +123,15 @@ public:
 
         if (bResult)
         {            
-            printf("Opened '%s' as Block Device\n", sFileName);
-            printf(" - %s\n", _read_only ? "read-only" : "read/write");
-            printf(" - size = %lldMB / %lldMiB, sector size = %lld\n", _fsize / (1000 * 1000), _fsize / (1024 * 1024), sector_size);
+            _cprintf("Opened '%s' as Block Device\n", sFileName);
+            _cprintf(" - %s\n", _read_only ? "read-only" : "read/write");
+            _cprintf(" - size = %lldMB / %lldMiB, sector size = %lld\n", _fsize / (1000 * 1000), _fsize / (1024 * 1024), sector_size);
         }
         else
-            printf("Error getting volume/disk size: %lu\n", GetLastError());
+        {
+            _cprintf("Error getting volume/disk size\n");
+            throw ErrorMessage();
+        }
         fflush(stdout);
     }
 
@@ -138,7 +146,7 @@ public:
         LONG high, low;
         low = (offset);
         high = (offset >> 32);
-        // printf("seek %d * 512 = %ld\n", sector, offset);
+        // _cprintf("seek %d * 512 = %ld\n", sector, offset);
         SetFilePointer(_fp, low, &high, FILE_BEGIN);
     }
 
@@ -173,7 +181,10 @@ public:
                 sector_offset = 0;
         }
         else
-            printf("Error reading sectors: %ld\n", GetLastError());
+        {
+            _cprintf("An error occured while trying to read sectors\n");
+            throw ErrorMessage();
+        }
     }
 
     // TODO: This method is not optimized, nonetheless in game write operations are not critical
@@ -195,9 +206,13 @@ public:
         // Finally write sectors
         SetFilePointer(_fp, low, &high, FILE_BEGIN);
         ret = WriteFile(_fp, sector_buffer, aux_size, &rv, NULL);
-        // printf("write %ld\n", size);
+        // _cprintf("write %ld\n", size);
         if (ret == 0)
-            printf("write error %ld != %llu,%lu\n", rv, size, GetLastError());
+        {
+            _cprintf("An error occured while trying to write sectors\n");
+            _cprintf("write error %ld != %llu\n", rv, size);
+            throw ErrorMessage();
+        }
     }
 
     uint32_t get_sector_size() { return sector_size; }
@@ -236,14 +251,15 @@ public:
         {
             /* Tell the user that we could not find a usable */
             /* Winsock DLL.                                  */
-            printf("WSAStartup failed with error: %d\n", err);
+            _cprintf("WSAStartup failed\n");
+            throw ErrorMessage();
         }
 
         // create a UDP socket
         if ((s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) == -1)
         {
-            printf("%lu\n", GetLastError());
-            throw runtime_error("socket");
+            _cprintf("Failed to create a UDP socket\n");
+            throw ErrorMessage();
         }
 
         // bind socket to port
@@ -251,9 +267,10 @@ public:
         si_me.sin_family = AF_INET;
         si_me.sin_port = htons(UDPBD_PORT);
         si_me.sin_addr.s_addr = htonl(INADDR_ANY);
-        if (::bind(s, (struct sockaddr*)&si_me, sizeof(si_me)) == -1)
+        if (bind(s, (struct sockaddr*)&si_me, sizeof(si_me)) == -1)
         {
-            throw runtime_error("bind");
+            _cprintf("Failed to bind the socket to a port\n");
+            throw ErrorMessage();
         }
 
         // Enable broadcasts
@@ -274,7 +291,7 @@ public:
         int recv_len;
         char buf[BUFLEN];
 
-        printf("Server running on port %d (0x%x)\n", UDPBD_PORT, UDPBD_PORT);
+        _cprintf("Server running on port %d (0x%x)\n", UDPBD_PORT, UDPBD_PORT);
 
         // Start server loop
         while (1)
@@ -282,7 +299,8 @@ public:
             // Receive command from ps2
             if ((recv_len = recvfrom(s, buf, BUFLEN, 0, (struct sockaddr *)&si_other, &slen)) == -1)
             {
-                throw runtime_error("recvfrom");
+                _cprintf("Failed to receive a message from the PS2\n");
+                throw ErrorMessage();
             }
 
             struct SUDPBDv2_Header *hdr = (struct SUDPBDv2_Header *)buf;
@@ -290,7 +308,7 @@ public:
             if (wait_network)
             {
                 wait_network = false;
-                printf("Waiting for the network to fully initialize . . .\n");
+                _cprintf("Waiting for the network to fully initialize . . .\n");
                 Sleep(4000);
             }
 
@@ -310,7 +328,7 @@ public:
                 handle_cmd_write_rdma(si_other, (struct SUDPBDv2_RDMA *)buf);
                 break;
             default:
-                printf("Invalid cmd: 0x%x\n", hdr->cmd);
+                _cprintf("Invalid cmd: 0x%x\n", hdr->cmd);
             };
         }
     }
@@ -318,7 +336,7 @@ public:
 private:
     void print_stats()
     {
-        printf(" Total read: %llu KiB, total write: %llu KiB\r", _total_read/1024, _total_write/1024);
+        _cprintf(" Total read: %llu KiB, total write: %llu KiB\r", _total_read/1024, _total_write/1024);
         fflush(stdout);
     }
 
@@ -330,7 +348,7 @@ private:
             _block_size        = 1 << (_block_shift + 2);
             _blocks_per_packet = RDMA_MAX_PAYLOAD / _block_size;
             _blocks_per_sector = _bd.get_sector_size() / _block_size;
-            printf("Block size changed to %d\n", _block_size);
+            _cprintf("Block size changed to %d\n", _block_size);
         }
     }
 
@@ -365,7 +383,7 @@ private:
         char str[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &si_other.sin_addr, str, INET_ADDRSTRLEN);
 
-        printf("UDPBD_CMD_INFO from %s     \n", str);
+        _cprintf("UDPBD_CMD_INFO from %s     \n", str);
         print_stats();
 
         // Reply header
@@ -379,7 +397,7 @@ private:
         // Send packet to ps2
         if (sendto(s, (char *)&reply, sizeof(reply), 0, (struct sockaddr *)&si_other, sizeof(si_other)) == -1)
         {
-            printf("Error calling sendto in handle_cmd_info\nReady for Retry\n");
+            _cprintf("Error calling sendto in handle_cmd_info\nReady for Retry\n");
         }
     }
 
@@ -387,7 +405,7 @@ private:
     {
         struct SUDPBDv2_RDMA reply;
 
-        printf("UDPBD_CMD_READ(cmdId=%d, startSector=%d, sectorCount=%d)\n", request->hdr.cmdid, request->sector_nr, request->sector_count);
+        _cprintf("UDPBD_CMD_READ(cmdId=%d, startSector=%d, sectorCount=%d)\n", request->hdr.cmdid, request->sector_nr, request->sector_count);
 
         // Optimize RDMA block size for number of sectors
         set_block_shift_sectors(request->sector_count);
@@ -418,7 +436,8 @@ private:
             // Send packet to ps2
             if (sendto(s, (char *)&reply, sizeof(struct SUDPBDv2_Header) + 4 + (reply.bt.block_count * _block_size), 0, (struct sockaddr *)&si_other, sizeof(si_other)) == -1)
             {
-                throw runtime_error("Error calling sendto in handle_cmd_read");
+                _cprintf("Error calling sendto in handle_cmd_read\n");
+                throw ErrorMessage();
             }
             reply.hdr.cmdpkt++;
         }
@@ -426,7 +445,7 @@ private:
 
     void handle_cmd_write(struct sockaddr_in &si_other, struct SUDPBDv2_RWRequest *request)
     {
-        printf("UDPBD_CMD_WRITE(cmdId=%d, startSector=%d, sectorCount=%d)\n", request->hdr.cmdid, request->sector_nr, request->sector_count);
+        _cprintf("UDPBD_CMD_WRITE(cmdId=%d, startSector=%d, sectorCount=%d)\n", request->hdr.cmdid, request->sector_nr, request->sector_count);
 
         _bd.seek(request->sector_nr);
         _write_size_left = request->sector_count * 512;
@@ -438,7 +457,7 @@ private:
     void handle_cmd_write_rdma(struct sockaddr_in &si_other, struct SUDPBDv2_RDMA *request)
     {
         size_t size = request->bt.block_count * (1 << (request->bt.block_shift + 2));
-        // printf("UDPBD_CMD_WRITE_RDMA(cmdId=%d, BS=%d, BC=%d, size=%ld)\n", request->hdr.cmdid, request->bt.block_shift, request->bt.block_count, size);
+        // _cprintf("UDPBD_CMD_WRITE_RDMA(cmdId=%d, BS=%d, BC=%d, size=%ld)\n", request->hdr.cmdid, request->bt.block_shift, request->bt.block_count, size);
 
         _bd.write(request->data2, size);
         _write_size_left -= size;
@@ -455,7 +474,8 @@ private:
             // Send packet to ps2
             if (sendto(s, (char *)&reply, sizeof(reply), 0, (struct sockaddr *)&si_other, sizeof(si_other)) == -1)
             {
-                throw runtime_error("Error calling sendto in handle_cmd_write_rdma");
+                _cprintf("Error calling sendto in handle_cmd_write_rdma\n");
+                throw ErrorMessage();
             }
         }
     }
@@ -473,41 +493,18 @@ private:
     uint32_t _write_size_left;
 };
 
-void print_help(char *exe)
+extern "C" __declspec(dllexport) int Run_udpbd_server(char *path)
 {
-    printf("Usage:\n");
-    printf("  %s <file>\n", exe);
-    printf("Example:\n");
-    printf("Replace drive letter 'E' to target an exFAT volume/partition\n");
-    printf("  %s \\\\.\\E:\n", exe);
-    printf("or\n");
-    printf("  & '%s' '\\\\.\\E:'\n\n", exe);
-}
-
-int main(int argc, char *argv[])
-{
-    if (argc < 2)
-    {
-        print_help(argv[0]);
-        return -1;
-    }
-    string arg = argv[1];
-    if (arg == "-h" || arg == "-?" || arg == "-help" || arg == "--help")
-    {
-        print_help(argv[0]);
-        return -1;
-    }
-
+    _cprintf("UDPBD-Server Started\n");
     try
     {
-        class CBlockDevice bd(argv[1]);
+        class CBlockDevice bd(path);
         class CUDPBDServer srv(bd);
         srv.run();
     }
-    catch (exception &e)
+    catch (std::exception &e)
     {
-        cout << e.what() << '\n';
-        return -2;
+        return std::stoi(e.what());
     }
 
     return 0;
